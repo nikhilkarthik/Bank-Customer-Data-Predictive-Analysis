@@ -1,0 +1,669 @@
+---
+title: "Stat 551 Final Project White Paper"
+author: "Nikhil Karthik Pamidimukkala"
+date: "April 29, 2019"
+output: pdf_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = FALSE)
+```
+
+
+
+```{r,warning=F,message=F}
+library(readxl)
+library(dplyr)
+library(earth)
+library(caret)
+library(gains)
+library(smbinning)
+library(ROCR)
+library(CustomerScoringMetrics)
+library(InformationValue)
+library(knitr)
+library(captioner)
+library(ROCit)
+cap <- captioner()
+tab <- captioner(prefix = "Table")
+```
+
+# 1. Introduction
+
+The data we have is a credit card transaction data for 9997 customers. After several stages of analysis of this, in this step the analysis is focused on good customers so that they can be given incentives to make the them use the card more to make money. These incentives can include credit line increases or annual fee waivers. However, defining a a good or bad customer should be done with great care as wrong analysis could cost millions.
+
+# 2. Data Pre-processing
+
+Certain criterias are adopted for filtering out bad customers after the data analysis in previous step which include.
+
+* Customers with Days Delinquent >0 in their first transaction record in the data 
+
+* Customers with non-blank external status (Account froze, revoked, closed etc.) 
+
+* Customers who have an ending/opening balance which exceeds credit limit.
+
+All the customers who meet any of the above criteria are removed from the data.
+
+
+# 3. Defining Bad
+
+Even after filtering out the bad customers from the data, a Binary response variable Bad(1/0) is created based on the following criteria:
+
+* Customers with Final transaction record in data / final month having Days Deliquent greater or equal to 90 are categorized as Bad(Bad = 1)
+
+*  Customer with Final transaction record in data / final month having external status  other than 'Closed' and 'Open' with this status being month 7 or greater are categorized as Bad.
+
+* All the other customers are categorized as Good (Bad = 0).
+
+
+
+
+
+
+
+```{r,warning=F,message=FALSE,out.width='205px',fig.align='center'}
+RetentionData <- read_excel("RetentionDataRaw (1).xlsx",sheet = 1, range = cell_rows(1:91503), col_names = TRUE)
+
+# Duplicating Data 
+DuplicateData <- RetentionData
+names(DuplicateData) <- gsub(" ", "_", names(DuplicateData))
+# Removing Data that contains na values in DebtDemId
+DuplicateData<-DuplicateData[!is.na(DuplicateData$DebtDimId),]    
+
+# Making Syntactically Valid Names
+#names(DuplicateData) <- make.names(names(DuplicateData)) 
+
+# Assigning the Full Forms of External Status 
+DuplicateData$External_Status[is.na(DuplicateData$External_Status)] <- "Open"
+
+# Subsetting only first row every customer
+NewData <- subset(DuplicateData,!duplicated(DuplicateData[,1])) 
+
+# select customer whos first row has external status as either c('C','E','I','F','Z')
+custrmv <- NewData$DebtDimId[NewData$External_Status %in% c('C','E','I','F','Z')]
+
+# Remove the customers selected above
+newdata<- NewData[!NewData$DebtDimId %in% custrmv,]
+
+# if ending balance or opening balance greater than credit limit then 1 else 0
+newdata$ovr <-ifelse((newdata$Ending_Balance > newdata$Credit_Limit) | (newdata$Opening_Balance > newdata$Credit_Limit),1,0 )
+
+# removing customer row where whose ending/opening balance greater than credit limit
+newdt<- newdata %>% filter(ovr == 0) 
+
+newdt$Deliqgreater0 <- ifelse(newdt$Days_Deliq > 0,1,0)
+
+newdtt <- newdt %>% filter(Deliqgreater0 == 0)
+
+# removing customers whose ending/opening balance greater than credit limit
+moddat <-  DuplicateData[DuplicateData$DebtDimId %in% newdtt$DebtDimId, ]
+
+# Defining Bad
+
+# subsetting only last row for each customer
+undup<- moddat[!rev(duplicated(rev(moddat$DebtDimId))),]
+
+undup$Bad <- ifelse(undup$Days_Deliq >= 90,1,0)
+
+undup1<- undup %>% filter(Bad == 0)
+
+
+checkstatus <- undup1$DebtDimId[undup1$External_Status %in%  c('E','I','F','Z')] 
+checkstsdf <- DuplicateData[DuplicateData$DebtDimId %in% checkstatus,]
+d<- checkstsdf[checkstsdf$Row_Num >=7 & checkstsdf$External_Status %in% c('E','I','F','Z'),]
+
+#statusmorethan7 <- checkstsdf %>% group_by(DebtDimId,External_Status) %>% tally() %>% filter(External_Status %in% c('E','I','F','Z') & n >= 7 ) %>% dplyr::select(DebtDimId)
+
+
+undup$Bad[undup1$DebtDimId %in% unique(d$DebtDimId)] <- 1
+
+badcust <- undup %>%  filter(Bad == 1) %>% dplyr::select(DebtDimId)
+goodcust <- undup %>%  filter(Bad == 0) %>% select(DebtDimId)
+
+moddat$Bad  <- ifelse(moddat$DebtDimId %in% badcust$DebtDimId,1,0)
+
+uniquemoddata <- subset(moddat,!duplicated(moddat[,1])) 
+
+
+uniquemoddata<- as.data.frame(uniquemoddata)
+
+
+
+#uniquemoddata$Net_Purchases_During_Cycle <-  ifelse(uniquemoddata$Net_Purchases_During_Cycle < 0, abs(uniquemoddata$Net_Purchases_During_Cycle),uniquemoddata$Net_Purchases_During_Cycle)
+
+
+#uniquemoddata$Net_Payments_During_Cycle <-  ifelse(uniquemoddata$Net_Payments_During_Cycle < 0, abs(uniquemoddata$Net_Payments_During_Cycle),uniquemoddata$Net_Payments_During_Cycle)
+# sumtorec <- (uniquemoddata$Net_Purchases_During_Cycle + uniquemoddata$Net_Cash_Advances_During_Cycle + uniquemoddata$Net_Premier_Fees_Billed_During_Cycle + uniquemoddata$Net_Behavior_Fees_Billed_During_Cycle + uniquemoddata$Net_Concessions_Billed_During_Cycle) 
+# 
+# uniquemoddata$sumtorec <- sumtorec
+
+#uniquemoddata$sumtorec[uniquemoddata$sumtorec <0] <- 0
+
+#uniquemoddata$sumprop <- uniquemoddata$sumtorec/uniquemoddata$Credit_Limit
+
+
+uniquemoddata$Bad <- as.integer(uniquemoddata$Bad)
+
+
+uniquemoddata %>% count(Bad) %>% ggplot(., aes(x=factor(Bad),y=n)) + geom_bar(stat = "identity",fill ="steelblue",width = 0.4) + geom_text(aes(label = n,vjust=-0.2)) +labs(x="Bad",y="Count",title = "Distribution of Bad")
+
+
+```
+
+
+\begin{center}
+`r cap("p1","Distribution of Bad")`
+\end{center}
+
+
+# 4. Variable Creation
+
+To find the predictive power in Variables, Supervised Discretization  has been used which bins  a continuous feature mapped to a target variable. The central idea is to find those cutpoints that maximize the difference between the groups. This is done using the smbinning function which conditional inference trees to determine cut points. After examining whether there were any significant with the variables, certain transformation of have variables have been done. To find directionality, bad rate vs binned variables was plotted.
+
+* **Months on Book** : Months on books was found to have significant splits and it was binned to whether bad rates where changing with months on books. Figure 2 shows that Bad Rate decreases with increase in Months on Books.
+
+
+```{r,out.width='300px',fig.align = 'center'}
+
+rslt<- smbinning(uniquemoddata,"Bad","Months_On_Book",p =0.05)
+rslt$ivtable[2:4,] %>% ggplot(., aes(x = reorder(Cutpoint,-GoodRate),y = GoodRate)) + geom_bar(stat="identity",fill="steelblue",width = 0.4) + labs(x="Months on Books",y="Bad Rate", title = "Bad Rate vs Months on Books") 
+
+
+
+
+
+uniquemoddata$monthscut <- cut(uniquemoddata$Months_On_Book, breaks=c(-1,4,27,Inf), labels=c( "<=4","<=27",">27"))
+
+```
+
+\begin{center}
+`r cap("p2","Bad Rate vs Months on Books")`
+\end{center}
+
+
+
+* **Due Proportion** : Due Proportion is ratio of total minimum payment due to credit limit. It is binned using smbinnig fuction to see whether bad rate chanes with Dueproportion. Figure 4, shows that Bad Rate increasing with increase in Due Proportion.
+
+```{r,out.width='300px',fig.align='center'}
+
+
+uniquemoddata$DueProp <- uniquemoddata$Total_Min_Pay_Due/uniquemoddata$Credit_Limit
+
+
+
+rslt1<- smbinning(uniquemoddata,"Bad","DueProp",p=0.05)
+
+rslt1$ivtable[1:4,] %>% ggplot(., aes(x = Cutpoint,y = GoodRate)) + geom_bar(stat="identity",fill="steelblue",width = 0.4) + labs(x="Due Proportion",y="Bad Rate", title = "Bad Rate vs DueProportion") 
+
+uniquemoddata$duepropcut <- cut(uniquemoddata$DueProp, breaks=c(-1,0.0589,0.0815,0.0998,1), labels=c("<=0.05897", "<=0.0815","<=0.0998","> 0.0998"))
+
+
+```
+
+\begin{center}
+`r cap("p3","Bad Rate vs Due Proportion")`
+\end{center}
+
+
+* **Balance Proportion** : Balance Proportion variable is defined as follows
+
+* If Opening and Ending Balance is negative , Balance proportion is zero.
+* If Opening Balance is positive and Ending Balance Negative, Balance Proportion is zero.
+* If Opening Balance is negative and Ending balance positive, Balance Proportion is Ending Balance/Credit Limit.
+* If Opening and Ending balance is positive, Balance Proportion is mean of Opening and Ending Balance/ Credit Limit. 
+
+Figure 4 shows that Bad Rate increases as Balance Proportion increases.
+
+```{r,out.width='300px',fig.align='center'}
+uniquemoddata$BalProp <- ifelse(uniquemoddata$Opening_Balance <= 0 & uniquemoddata$Ending_Balance<= 0,0,ifelse
+(uniquemoddata$Opening_Balance <0 & uniquemoddata$Ending_Balance>0,uniquemoddata$Ending_Balance/uniquemoddata$Credit_Limit,ifelse(uniquemoddata$Opening_Balance>0 & uniquemoddata$Ending_Balance <0,0,ifelse(uniquemoddata$Opening_Balance >=0 & uniquemoddata$Ending_Balance>=0,((uniquemoddata$Opening_Balance+uniquemoddata$Ending_Balance)/2)/uniquemoddata$Credit_Limit,0))))
+
+
+rslt4<- smbinning(uniquemoddata,"Bad","BalProp",p=0.05)
+
+rslt4$ivtable[1:3,] %>% ggplot(., aes(x = Cutpoint,y = GoodRate)) + geom_bar(stat="identity",fill='steelblue',width = 0.4) + labs(x="Balance Prooportion",y="Bad Rate", title = "Bad Rate vs Balance Proportion")
+
+uniquemoddata$balpropcut <- cut(uniquemoddata$BalProp, breaks=c(-1, 0.2831,0.7316, 3), labels=c("<=0.2831", "<=0.7316","> 0.7316"))
+
+#uniquemoddata$Utilization <- ifelse(uniquemoddata$Ending_Balance>0,uniquemoddata$Ending_Balance/uniquemoddata$Credit_Limit,0)
+
+#rslt5<- smbinning(un/iquemoddata,"Bad","Utilization",p=0.05)
+
+#rslt5$ivtable[1:3,] %>% ggplot(., aes(x = Cutpoint,y = GoodRate)) + geom_bar(stat="identity") + labs(x="Payments",y="Bad Rate", title = "Bad Rate vs Utilization")
+
+#uniquemoddata$utilizationcut <- cut(uniquemoddata$Utilization, breaks=c(-1,0.5657,0.6833,2), labels=c("<= 0.5657", "<= 0.6833","> 0.6833"))
+
+
+
+```
+
+\begin{center}
+`r cap("p4","Bad Rate vs Balance Proportion")`
+\end{center}
+
+
+# 5. Model Building
+
+The variables created monotonically change with Bad Rate. Finally we consider binned version of Months on Books, Binned version of Due Proportion and continuous Balance Proportion as predictors. MARS and Logistic Regression models are considered to model Bad(1/0). The data set is split into 60% training and 40% validation set.  
+
+
+## 5.1 MARS Model
+
+Multivariate adaptive regression splines (MARS) provide a convenient approach to capture the nonlinearity aspect of polynomial regression by assessing cutpoints (knots) similar to step functions. The procedure assesses each data point for each predictor as a knot and creates a linear regression model with the candidate feature. The coefficients of the MARS model in Table 1 shows the coefficients of the MARS model. The values of these coefficients show what the Bad Rate vs Binned variable in figure 2,3,4 show.s i.e. as month in books increase the probability of bad decreases etc.
+
+
+```{r,warning=F}
+
+
+
+set.seed(602)
+indxx <- createDataPartition(uniquemoddata$Bad, p = 0.6, list=FALSE)
+trainfull <- uniquemoddata[indxx,]
+testfull <-  uniquemoddata[-indxx,]
+
+testfull$Good_Customer_Score <- as.numeric(testfull$Good_Customer_Score)
+tstfull<- testfull[!is.na(testfull$Good_Customer_Score),]
+
+
+mars1 <- earth(Bad~monthscut+duepropcut+BalProp, data = trainfull,glm=list(family = binomial))
+#summary(mars1)
+
+```
+
+
+
+
+\begin{center}
+	\begin{tabular}{| l || l | l | l | l |}
+		\hline 
+    Coefficient & Value   \\ \hline\hline
+		Intercept &  -2.5622088  \\
+		\hline
+		monthscut<=27 & -0.4549359 \\
+		\hline
+		 monthscut>27 & -0.7245608   \\
+		\hline
+		 duepropcut<=0.0815  & 0.6105836     \\
+		\hline
+		duepropcut<=0.0998  & 0.8165267    \\
+		\hline
+		duepropcut>0.0998  & 1.0780799    \\
+		\hline
+		h(BalProp-0.6124) & 2.4546609  \\
+
+		\hline
+	\end{tabular}
+\end{center}
+
+\begin{center}
+`r tab("t1","Coefficients of MARS Model")`
+\end{center}
+
+
+### 5.1.1 ROC Curve for MARS
+
+The ROC chart shows false positive rate (1-specificity) on X-axis against true positive rate (sensitivity) on Y-axis Ideally, the curve will climb quickly toward the top-left meaning the model correctly predicted the cases. The diagonal line is for a random model. ROC Curve can also help in selecting an optimal classification threshold which gives a balanced true positive and false postive rates.
+
+```{r,out.width='300px',fig.align='center'}
+
+# rOC curve
+pred11 <- prediction(predict(mars1,newdata = tstfull,type = "response"), tstfull$Bad)
+perf11 <- performance(pred11,"tpr","fpr")
+perf22 <- performance(pred11,"acc")
+plot(perf11,colorize =T,print.cutoffs.at=seq(0.1,by=0.1),main ="ROC Curve - MARS")
+auc1 <- performance(pred11,"auc")
+auc1 <- unlist(slot(auc1, "y.values"))
+auc1 <-  round(auc1,4)
+legend(.6,.2,auc1,title = "AUC")
+abline(0,1)
+
+```
+
+\begin{center}
+`r cap("p5","ROC Curve for MARS model")`
+\end{center}
+
+
+
+
+### 5.1.2 Confusion Matrix for MARS
+
+The clasification threshold was set to 0.15. The Accuracy obtained by the MARS model is 71.16%. The specificity is 52.94 % and sensitivity is 73.69%. The positive class considered here is 0 i.e Good.
+
+```{r}
+marspredresp<- c(predict(mars1,newdata = tstfull,type = "response"))
+marspred<- factor(ifelse(marspredresp > 0.15,1,0))
+marsbad <- factor(tstfull$Bad)
+#caret::confusionMatrix(marspred,marsbad)
+
+
+
+```
+
+
+
+\begin{center}
+	\begin{tabular}{| l || l | l | l | l |}
+		\hline 
+		 &
+		 \multicolumn{2}{|c|}{Actual}  \\
+		\hline
+    Prediction &  0 & 1  \\ \hline\hline
+		0 &  1440  & 128    \\
+		\hline
+		1 & 514 &  144   \\
+		\hline
+		
+	\end{tabular}
+\end{center}
+
+\begin{center}
+`r tab("t2","Confusion Matrix for MARS Model")`
+\end{center}
+
+
+### 5.1.3 KS Curve
+K-S is a measure of the degree of separation between the positive and negative distributions. The KS stat value is 0.27. Zero KS value indicates the model selects cases randomly from the population.
+
+```{r,out.width='300px',fig.align='center'}
+ROCit_obj <- rocit(score=marspredresp,class=tstfull$Bad)
+
+ksplot(ROCit_obj)
+
+```
+
+
+\begin{center}
+`r cap("p6","KS Curve for MARS model")`
+\end{center}
+
+### 5.1.4 Lift Chart for MARS
+
+The lift chart shows how much more likely we are to select good customers than if we select a random sample of customers. The lift chart shows that considering only the first 10% of the customers will allow in selecting 2.4 times more good customers using the predictive model than done randomly.
+
+
+```{r,out.width='250px',fig.align='center'}
+
+gtab<- gainstable(ROCit_obj)
+plot(gtab,type=1) 
+title(main="Lift Chart - MARS")
+```
+
+\begin{center}
+`r cap("p7","Lift Chart - MARS")`
+\end{center}
+
+
+### 5.1.5 Gains Table for MARS 
+
+
+
+```{r}
+print(gains(tstfull$Bad,marspredresp))
+```
+
+\begin{center}
+`r tab("t3","Gains Table for MARS Model")`
+\end{center}
+
+
+```{r,out.width='300px',fig.align='center'}
+cumGainsChart(marspredresp,tstfull$Bad)
+grid()
+```
+
+\begin{center}
+`r cap("p8","Gains Chart - MARS")`
+\end{center}
+
+
+## 5.2 Logistic Regression
+
+A logistic regression model is fit on the training data to model the response variable Bad(1/0). All the model coefficients are significant and indicate the same outcomes as the MARS model. i.e. Probability of Bad decreases with increase in months on books, increases with increase in DueProportion and increases with as Balance Proportion increases. The coefficients are reported in Table 4.
+
+```{r}
+
+
+logreg <- glm(Bad~monthscut+duepropcut+BalProp,data = trainfull,family = binomial())
+#summary(logreg)
+
+
+
+
+```
+
+
+
+\begin{center}
+	\begin{tabular}{| l || l | l | l | l |}
+		\hline 
+    Coefficient & Value   \\ \hline\hline
+		Intercept &  -2.8749   \\
+		\hline
+		monthscut<=27 & -0.4239  \\
+		\hline
+		 monthscut>27 &  -0.7067   \\
+		\hline
+		 duepropcut<=0.0815  & 0.5435    \\
+		\hline
+		duepropcut<=0.0998  & 0.7413    \\
+		\hline
+		duepropcut>0.0998  & 0.9808    \\
+		\hline
+		 BalProp &  1.0622   \\
+
+		\hline
+	\end{tabular}
+\end{center}
+
+\begin{center}
+`r tab("t4","Coefficients of Logistic Regression Model")`
+\end{center}
+
+
+
+### 5.2.1 ROC Curve  for logistic regression
+
+The ROC Curve of the logistic regression is shown in Figure 8. Looking at the ROC Curve, the threshold value for classificcation between 0.1 and 0.2 is appropriate to maintain the balance between True Postive Rate and False Positive Rate.
+
+```{r,out.width='300px',fig.align='center'}
+# roc cruve
+pred1 <- prediction(predict(logreg,newdata = tstfull,type = "response"), tstfull$Bad)
+perf1 <- performance(pred1,"tpr","fpr")
+plot(perf1,colorize =T,print.cutoffs.at=seq(0.1,by=0.1),main="ROC Curve - Logistic Regression")
+auc <- performance(pred1,"auc")
+auc <- unlist(slot(auc, "y.values"))
+auc <-  round(auc,4)
+legend(.6,.2,auc,title = "AUC")
+abline(0,1)
+```
+
+\begin{center}
+`r cap("p9","ROC Curve for Logistic Regression model")`
+\end{center}
+
+
+### 5.2.2 Confusion Matrix for Logistic Regression
+The clasification threshold was set to 0.15. The Accuracy obtained by the logistic regression  model is 71.43%. The specificity is 54.41 % and sensitivity is 73.80 %. The positive class considered here is 0 i.e Good.
+
+
+```{r}
+logregpredresp<- predict(logreg,newdata = tstfull,type="response")
+logpreds<- factor(ifelse(logregpredresp > 0.15,1,0))
+logbad<- as.factor(tstfull$Bad)
+#caret::confusionMatrix(logpreds,logbad)
+
+
+
+```
+
+
+\begin{center}
+	\begin{tabular}{| l || l | l | l | l |}
+		\hline 
+		 &
+		 \multicolumn{2}{|c|}{Actual}  \\
+		\hline
+    Prediction &  0 & 1  \\ \hline\hline
+		0 &  1440  & 128    \\
+		\hline
+		1 & 514 &  144   \\
+		\hline
+		
+	\end{tabular}
+\end{center}
+
+\begin{center}
+`r tab("t5","Confusion Matrix of Logistic Regression Model")`
+\end{center}
+
+
+
+
+### 5.2.3 KS Curve for Logistic Regression
+K-S is a measure of the degree of separation between the positive and negative distributions. The KS stat value is the maximum distance between 0.27 between two the CDF and for logistic regression it is 0.29.
+
+```{r,out.width='250px',fig.align='center'}
+
+ROCit_objj <- rocit(score=logregpredresp,class=tstfull$Bad)
+
+ksplot(ROCit_objj)
+
+
+```
+
+\begin{center}
+`r cap("p10","ROC Curve for Logistic Regression model")`
+\end{center}
+
+
+### 5.2.4 Lift Chart for Logistic Regression
+
+The lift chart shows how much more likely we are to select good customers than if we select a random sample of customers. The lift chart shows that considering only the first 10% of the customers will allow in selecting 2.5 times more good customers using the predictive model than done randomly.
+
+```{r,out.width='300px',fig.align='center'}
+
+gtab1<- gainstable(ROCit_objj)
+plot(gtab1,type=1) 
+title(main="Lift Chart - Logistic Regression")
+
+
+
+```
+
+\begin{center}
+`r cap("p11","Lift Chart for Logistic Regression model")`
+\end{center}
+
+
+### 5.2.5 Gains Table for Logistic Regression
+
+
+
+```{r}
+
+gains(tstfull$Bad,logregpredresp)
+
+```
+
+
+
+\begin{center}
+`r tab("t6","Gains Table of Logistic Regression Model")`
+\end{center}
+
+
+```{r,out.width='300px',fig.align='center'}
+
+cumGainsChart(logregpredresp,tstfull$Bad) 
+grid()
+```
+
+
+\begin{center}
+`r cap("p11","Gains Chart of Logistic Regression Model")`
+\end{center}
+
+
+# 6. Gains Table for Good Customer Score
+
+Good Customer Score is considered just another model whose probability score is converted into points. To compare this model with our's, we use a gains table.  Comparing the Gains Charts of logistic regression in Figure 11 and Gains Chart of Good Customer Score in Figure 12, we can say the percentage of Good customers covered at the first few deciles is higher for the logistic regression model than the Good Customer Score Model. Therefore we can say our model performs better than the Good Customer Score Model.
+
+
+```{r}
+gains(tstfull$Bad,tstfull$Good_Customer_Score)
+
+
+
+```
+
+
+\begin{center}
+`r tab("t7","Gains Table of Good Customer Score")`
+\end{center}
+
+
+```{r,out.width='250px',fig.align='center'}
+cumGainsChart(tstfull$Good_Customer_Score,tstfull$Bad)
+grid()
+
+```
+
+
+\begin{center}
+`r cap("p12","Gains Chart of Good Customer Score")`
+\end{center}
+
+
+```{r}
+
+
+NetPaymentSum<-DuplicateData[,c("DebtDimId","Net_Payments_During_Cycle")]
+NetPaymentSum <- 
+  unique(transform(NetPaymentSum, Net_Payments_During_Cycle=ave(Net_Payments_During_Cycle,DebtDimId,FUN = sum)))
+names(NetPaymentSum) <- c("DebtDimId","NetPaymentSum")
+
+uniquemoddata<- left_join(uniquemoddata,NetPaymentSum,by="DebtDimId")
+
+uniquemoddata$Profit <- if_else(uniquemoddata$Bad == "1", -(uniquemoddata$Ending_Balance), uniquemoddata$NetPaymentSum)
+
+```
+
+# 7. Profitability in Gains Table
+
+Determining Profit for particular customer is never a easy task. But we adopt the following definition to calculate profit.
+
+* Profit (Bad=0):  Sum up Net Payments for all rows of an account. 
+*	Profit (Bad=1):  Take the ending balance and make it a loss.  Make it negative.
+
+Based on the above definition we calculate the profitability in gains table which is shown in the following table. The Average Profit, Profit and Cumulative Profit at each decile of the customer population is shown. The final cumulative profit gained is 1119256.65. 
+
+```{r}
+tstfull$Logprb <- logregpredresp
+tstfull <- left_join(tstfull,uniquemoddata[,c('DebtDimId','Profit')],by="DebtDimId")
+
+
+folds = ntile(-logregpredresp,10)
+
+tstfull$folds <- folds
+prttab <-tstfull %>% group_by(folds) %>% summarise(mn =mean(Profit),sm= sum(Profit))
+prttab$Cumsum <- cumsum(prttab$sm)
+colnames(prttab) <- c("Folds","Average Profit","Profit","Cumulative Profit")
+
+loggains<- gains(tstfull$Bad,logregpredresp,10)
+
+logdf <- data.frame(a1=loggains[1],b1=loggains[2],c1 = loggains[3],d1 = loggains[4], e1 = loggains[5], f1=loggains[6],g1 = loggains[7],h1 = loggains[8],i1 = loggains[9])
+names(logdf) <- c("Depth of File","N","Cume N","Mean Resp","Cume Mean Resp","Cume Pct of Total Resp","Lift Index","Cume Lift","Mean Model Score")
+
+
+prft<- cbind(logdf[,1:3],prttab[,2:4])
+kable(prft,format = "pandoc")
+```
+
+
+
+
+\begin{center}
+`r tab("t8","Profitability in Gains Table")`
+\end{center}
+
